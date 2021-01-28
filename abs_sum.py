@@ -1,10 +1,9 @@
-'''
-A module dedicated for developing a LSTM-based neural network
-used for summerizing a text abstractively.
-'''
+# A module dedicated for developing a LSTM-based neural network used for summerizing a text abstractively.
 
 import pandas as pd
 import os
+import gzip
+import json
 from keras import backend
 from parse_dbs import preprocess_texts
 from keras.preprocessing.text import Tokenizer
@@ -12,34 +11,64 @@ from keras.preprocessing.sequence import pad_sequences
 from tensorflow.keras.layers import Input, LSTM, Embedding, Dense, Concatenate, TimeDistributed
 from tensorflow.keras.models import Model
 from b_attention import BahdanauAttentionLayer
+from itertools import chain
 from tensorflow.keras.callbacks import EarlyStopping
 TXT_COL = 'text'
 SUM_COL = 'summary'
 TITLE_COL = 'title'
+DB_TXT = 'description'
+DB_SUM = 'abstract'
+bpd_path = os.getcwd() + '/Datasets/bigPatentData/'
+path_bpd_train = bpd_path + 'train/'
+path_bpd_val = bpd_path + 'val/'
+folders = [chr(ascii_letter)+'/' for ascii_letter in chain(range(ord('a'), ord('i')), range(ord('y'), ord('y')+1))]
 
-training_corpus = pd.read_csv(os.getcwd() + '/Datasets/train-stats.csv', usecols=[TXT_COL, SUM_COL, TITLE_COL])
-val_corpus = pd.read_jsonl(os.getcwd() + '/Datasets/dev-stats.jsonl.gz', usecols=[TXT_COL, SUM_COL, TITLE_COL])
-# Omit NA if exist (in fact using «df.loc[pd.isna(df["text"]), :].index» at least one text is indeed missing)
+
+def append_entries(corpus, path):
+    idx = 0
+    updated_corpus = corpus.copy()
+    for gz_file in os.listdir(path):
+        with gzip.open(path+gz_file, 'r') as curr_file:
+            for row in curr_file:
+                json_row = json.loads(row)
+                df_dict = {'Index': idx, TXT_COL: json_row[DB_TXT], SUM_COL: json_row[DB_SUM]}
+                updated_corpus = updated_corpus.append(df_dict, ignore_index=True)
+                idx += 1
+    return updated_corpus
+
+
+training_corpus = pd.DataFrame()
+val_corpus = pd.DataFrame()
+
+for folder in folders:
+    curr_train_path = path_bpd_train + folder
+    curr_val_path = path_bpd_val + folder
+    new_training_entries = append_entries(training_corpus, curr_train_path)
+    new_val_entries = append_entries(val_corpus, curr_val_path)
+    training_corpus = training_corpus.append(new_training_entries)
+    val_corpus = val_corpus.append(new_val_entries)
+
+# Omit NA if exist
 training_corpus.dropna(axis=0, inplace=True)
 val_corpus.dropna(axis=0, inplace=True)
 cleaned_training = preprocess_texts(training_corpus, TXT_COL, SUM_COL)
 cleaned_val = preprocess_texts(val_corpus, TXT_COL, SUM_COL)
 
-max_len_text = 10000 #TODO: CHECK ME!!!!!!
-max_len_summary = 200 #TODO: CHECK ME AS WELL!!!!!!
-x_tr = cleaned_training['text']
+max_len_text = 10000 # TODO: CHECK ME!!!!!!
+max_len_summary = 200 # TODO: CHECK ME AS WELL!!!!!!
+x_tr = cleaned_training[TXT_COL]
 # Initialize a tokenizer
 x_tokenizer = Tokenizer()
 x_tr = x_tokenizer.fit_on_texts(list(x_tr))
 # embed a text as a sequence
 x_tr = pad_sequences(x_tr,  maxlen=max_len_text, padding='post')
-x_val = cleaned_val['text']
+x_val = cleaned_val[TXT_COL]
 x_val = x_tokenizer.fit_on_texts(list(x_val))
 x_val = pad_sequences(x_val, maxlen=max_len_text, padding='post')
 x_voc_size = len(x_tokenizer.word_index) + 1
 # Doing the same for summaries
-y_tr = cleaned_training['summary']
-y_val = cleaned_val['summary']
+y_tr = cleaned_training[SUM_COL]
+y_val = cleaned_val[SUM_COL]
 y_tokenizer = Tokenizer()
 y_tr = y_tokenizer.fit_on_texts(list(y_tr))
 y_val = y_tokenizer.fit_on_texts(list(y_val))
@@ -79,8 +108,8 @@ decoder_outputs = decoder_dense(decoder_concat_input)
 model = Model([in_enc, in_dec], decoder_outputs)
 model.summary()
 model.compile(optimizer='rmsprop', loss='sparse_categorical_crossentropy')
-early_stop = EarlyStopping(monitor= 'val_loss', mode='min', verbose=1)
+early_stop = EarlyStopping(monitor='val_loss', mode='min', verbose=1)
 
-history=model.fit([x_tr, y_tr[:, :-1]], y_tr.reshape(y_tr.shape[0], y_tr.shape[1], 1)[:, 1:],
-                  epochs=50, callbacks=[early_stop], batch_size=512, validation_data=([x_val, y_val[:, :-1]],
-                  y_val.reshape(y_val.shape[0], y_val.shape[1], 1)[:, 1:]))
+history = model.fit([x_tr, y_tr[:, :-1]], y_tr.reshape(y_tr.shape[0], y_tr.shape[1], 1)[:, 1:],
+                    epochs=50, callbacks=[early_stop], batch_size=512, validation_data=([x_val, y_val[:, :-1]],
+                    y_val.reshape(y_val.shape[0], y_val.shape[1], 1)[:, 1:]))

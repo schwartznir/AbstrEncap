@@ -1,8 +1,8 @@
 import pandas as pd
-import tarfile
-from itertools import chain
-from operator import itemgetter
 import numpy as np
+from numpy.linalg import norm
+from gensim.models import FastText
+from operator import itemgetter
 from pycontractions import Contractions as Ctr
 import nltk
 import os
@@ -20,55 +20,100 @@ nltk.download('wordnet')
 nltk.download('averaged_perceptron_tagger')
 stop_words = set(stopwords.words('english'))
 # We allow "foreign" letters in order to handle words with foreign etymology like «naïve»
-special_chars = r"^A-Za-zéëèàáäőóöœï\s"
-cont = Ctr(api_key='glove-twitter-200')
-#tar_db = tarfile.open(CWD+'/Databases/'+TARNAME)
-#tar_db.extractall(path=CWD+'/Databases')
+special_chars = r"[^ A-Za-zéëèàáäőóöœï\s]"
+cont = Ctr(api_key='glove-wiki-gigaword-50')
+pr_con = 0.5
+
+
+class Substitutable(str):
+    def __new__(cls, *args, **kwargs):
+        obj = str.__new__(cls, *args, **kwargs)
+        obj.sub = lambda old_str, new_str: Substitutable(re.sub(old_str, new_str, obj))
+        return obj
 
 
 def partition(list_, indices):
-    if 0 not in indices: indices.append(0)
-    #indices.append(len(list))
+    # Check whether the first two sentences are important.
+    if 0 not in indices:
+        indices.insert(0, 0)
+
     return [" ".join(list_[idx:jdx]) for idx, jdx in zip(indices, indices[1:] + [None])]
 
 
 ''' Preprocess a column of strings of a given DataFrame in several steps: a. Change all capital letters to lower '''
 
 
-def preprocess_texts(df, txt_col, sum_col):
-    counter = 0
-    processed_df = pd.DataFrame(columns=['title', 'text', 'summary', 'chunk of text no.'])
+def clean_text(sentences):
+    # a function that removes numbers, special characters and words of a signle letter from every sentence in a list
+    clean_sentences = []
+    new_vocab = []
 
+    for sentence in sentences:
+        subs_sentence = Substitutable(sentence.lower())
+        clean_sub_sentence = subs_sentence.sub(special_chars, '').sub(r'\d+', '').sub(r'\b[a-zA-Z]{1}\b', '')
+        if clean_sub_sentence:
+            str_sentence = str(clean_sub_sentence)
+            clean_sentences.append(str_sentence)
+            new_vocab = new_vocab + [word for word in str_sentence.split()]
+    return new_vocab, clean_sentences
+
+
+def preprocess_texts(df, txt_col, sum_col):
+    processed_df = pd.DataFrame(columns=['Index', txt_col, sum_col])
+    vocab = []
+    long_sources = []
     for idx, row in df.iterrows():
         text = row[txt_col]
         summary = row[sum_col]
         tokenized_text = sent_tokenize(text)
+        txt_vocab, clean_tokenized_text = clean_text(tokenized_text)
+        vocab += txt_vocab
+        tokenized_sum = sent_tokenize(summary)
+        summary_vocab, clean_tokenized_sum = clean_text(tokenized_sum)
+        vocab += summary_vocab
         key_sentences_num = len(sent_tokenize(summary))
-        scores_sentences = {tokenized_text.index(sentence): score_sentences(sentence, tokenized_text)
-                            for sentence in tokenized_text}
-        indices_of_key_sentences = sorted([sentence_idx
-                                    for sentence_idx, score in sorted(scores_sentences.items(), key=itemgetter(1),
-                                                                  reverse=True)[0:key_sentences_num]])
 
-        partited_text = partition(tokenized_text, indices_of_key_sentences)
-        split_summary = sent_tokenize(summary)
-        paragraphs_and_sentences = [[partited_text[idx], split_summary[idx]] for idx in range(0, key_sentences_num)]
+        line = {'Index': idx, txt_col: ' . '.join(clean_tokenized_text), sum_col: ' . '.join(clean_tokenized_sum),
+                'sen_num': key_sentences_num}
+
+        if key_sentences_num == 1:
+            processed_df = processed_df.append(line, ignore_index=True)
+            continue
+        else:
+            long_sources.apppend(line)
+
+    model_ft = FastText(sentences=vocab, window=3, min_count=2, size=300)
+    model_ft.train(sentences=vocab, total_examples=len(vocab), epochs=30)
+
+    for source in long_sources:
+        idx = source['index']
+        vectors = vectorize_sentences(source[txt_col], model_ft)
+        scores = score_sentences(vectors)
+        indices_of_key_sentences = sorted([sentence_idx
+                                          for sentence_idx, score in sorted(scores.items(), key=itemgetter(1),
+                                           reverse=True)[0:source['sen_num']]])
+
+        partited_text = partition(source[txt_col], indices_of_key_sentences)
+        paragraphs_and_sentences = [[partited_text[idx], tokenized_sum[idx]] for idx in range(0, key_sentences_num)]
 
         for elem in paragraphs_and_sentences:
-            elem[0] = expand_sentences(elem[0])
-            elem[1] = expand_sentences(elem[1])
-            processed_row = pd.Series([df['title'][counter], elem[0], elem[1], 0], index=processed_df.columns)
-            # eliminate possesion (The man's children --> The man children) with which Contractions has some problems
-            clean_processed_row = processed_row.str.replace("\'s", "", case=True, regex=True)
-            clean_processed_row = clean_processed_row.str.replace("[^a-z A-Z]", "", case=True, regex=True)
-            clean_processed_row = clean_processed_row.str.lower()
-            clean_processed_row['chunck of text no.'] = counter
-            processed_df = processed_df.append(clean_processed_row, ignore_index=True)
-
-        counter += 1
+            line = processed_line(elem[0], elem[1], idx, processed_df)
+            processed_df = processed_df.append(line, ignore_index=True)
 
     print("Preprocessed DataFrame is ready!")
     return processed_df
+
+
+def processed_line(text, summary, title, new_df):
+    exp_text = expand_sentences(text)
+    exp_summary = expand_sentences(summary)
+    processed_row = pd.Series([title, exp_text, exp_summary], index=new_df.columns)
+    # eliminate possesion (The man's children --> The man children) with which Contractions has some problems
+    clean_processed_row = processed_row.str.replace("\'s", " ", case=True, regex=True).\
+        str.replace("[^a-z A-Z]", " ", case=True, regex=True).\
+        str.lower()
+
+    return clean_processed_row
 
 
 def expand_sentences(text):
@@ -79,32 +124,45 @@ def expand_sentences(text):
 
     return expanded_texts_list[0]
 
-'''
-def contraction_expansion():
 
-    
+def vectorize_sentences(text, model):
+    vectors = []
 
-    download('stopwords')  # Download stopwords list.
-    stop_words = stopwords.words('english')
-    
-    expanded_texts = expand_sentences(df[txt_col])
-    expanded_summaries = expand_sentences(df[sum_col])
-    return pd.DataFrame({ txt_col: expanded_texts, sum_col: expanded_summaries})
-'''
+    for sentence in text.split('.'):
+        tagged_pos_sentence = pos_tagging(sentence)
+        vec = np.zeros(len(tagged_pos_sentence))
 
-def score_sentences(sentence, sentences):
-    score = 0
+        for word in tagged_pos_sentence:
 
-    sentence_wo_special_chars = re.sub(special_chars, '', sentence.lower())
-    clean_sentence = re.sub(r'\d+', '', sentence_wo_special_chars)
-    tagged_pos_sentences = pos_tagging(clean_sentence)
+            if word not in stop_words:
+                word = word_lemmatizer.lemmatize(word)
+                vec += word_tfidf(word, text, sentence) * model[word]
 
-    for word in tagged_pos_sentences:
-        if word not in stop_words and word.lower() not in stop_words and len(word) > 1:
-            word = word_lemmatizer.lemmatize(word.lower())
-            score = score + word_tfidf(word, sentences, clean_sentence)
+        vectors.append(vec)
 
-    return score
+    return vectors
+
+
+def score_sentences(vectors):
+
+    idx = 0
+    sentences_num = len(vectors)
+    scores = np.zeros(sentences_num)
+
+    for vector in vectors:
+        cosine_similarities = [vector.dot(another_vector) / (norm(vector) * norm(another_vector))
+                               for another_vector in vectors]
+        jdx = 0
+        score = pr_con
+
+        while jdx < idx:
+            sum_out = sum([cosine_similarities[k] for k in range(idx, sentences_num)])
+            score += (1 - pr_con) * scores[jdx] * cosine_similarities[jdx] / sum_out
+            jdx += 1
+
+        scores[idx] = score
+
+    return dict(zip([idx for idx in range(0, sentences_num)], scores))
 
 
 def pos_tagging(text):
@@ -147,6 +205,7 @@ def idf_score(sentences_num, word, sentences):
     return np.log10(sentences_num / (1 + sentences_cont_word))
 
 
+'''
 text='The name of the man\'s Harry Potter. Once upon a time\'s been a man.  \n \"Avada Kadabra\" Harry said to Voldemrt'
 summary='Hello. By the holy name!'
 example = {'title': ['Hello world!'], 'text': [text], 'summary': [summary], 'bullshit': [1]}
@@ -161,4 +220,19 @@ indices_of_key_sentences = sorted([idx
                                                                   reverse=True)[0:key_sentences_num]])
 
 
-print(score_sentences('Name is not their is',['Our are names Tom Riddle', 'Riddle is not their name is a names', 'OH name boy. The holy one']))
+print(score_sentences('Name is not their is',['Our are names Tom Riddle', 
+'Riddle is not their name is a names', 'OH name boy. The holy one']))
+'''
+
+'''
+def contraction_expansion():
+
+
+
+    download('stopwords')  # Download stopwords list.
+    stop_words = stopwords.words('english')
+
+    expanded_texts = expand_sentences(df[txt_col])
+    expanded_summaries = expand_sentences(df[sum_col])
+    return pd.DataFrame({ txt_col: expanded_texts, sum_col: expanded_summaries})
+'''

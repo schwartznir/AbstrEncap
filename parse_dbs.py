@@ -203,36 +203,3 @@ def idf_score(sentences_num, word, sentences):
             sentences_cont_word += 1
 
     return np.log10(sentences_num / (1 + sentences_cont_word))
-
-
-'''
-text='The name of the man\'s Harry Potter. Once upon a time\'s been a man.  \n \"Avada Kadabra\" Harry said to Voldemrt'
-summary='Hello. By the holy name!'
-example = {'title': ['Hello world!'], 'text': [text], 'summary': [summary], 'bullshit': [1]}
-ladf = pd.DataFrame(example)
-badf = preprocess_texts(ladf, 'text', 'summary')
-tokenized_text = sent_tokenize(text)
-key_sentences_num = len(sent_tokenize(summary))
-scores_indices = {tokenized_text.index(sentence): score_sentences(sentence, tokenized_text)
-                            for sentence in tokenized_text}
-indices_of_key_sentences = sorted([idx
-                                    for idx, score in sorted(scores_indices.items(), key=itemgetter(1),
-                                                                  reverse=True)[0:key_sentences_num]])
-
-
-print(score_sentences('Name is not their is',['Our are names Tom Riddle', 
-'Riddle is not their name is a names', 'OH name boy. The holy one']))
-'''
-
-'''
-def contraction_expansion():
-
-
-
-    download('stopwords')  # Download stopwords list.
-    stop_words = stopwords.words('english')
-
-    expanded_texts = expand_sentences(df[txt_col])
-    expanded_summaries = expand_sentences(df[sum_col])
-    return pd.DataFrame({ txt_col: expanded_texts, sum_col: expanded_summaries})
-'''
